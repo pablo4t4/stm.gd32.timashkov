@@ -1,0 +1,53 @@
+
+#include "gd32f30x.h"
+#include <stdio.h>
+#include "gd32f30x_usart.h"
+#include "gd32f30x_gpio.h"
+#include <string.h>
+#include <locale.h>
+
+#define RX_BUF_SIZE 64
+char rx_buf[RX_BUF_SIZE];
+uint8_t rx_idx = 0;
+volatile uint8_t rx_ready = 0;
+
+extern "C" void USART1_IRQHandler(void)
+{
+    if (usart_interrupt_flag_get(USART1, USART_INT_FLAG_RBNE) != RESET) {
+        uint8_t ch = usart_data_receive(USART1);
+        
+        usart_data_transmit(USART1, ch);
+        while (usart_flag_get(USART1, USART_FLAG_TBE) == RESET);
+    }
+}
+
+int main(void)
+{
+    setlocale(LC_ALL, "RUS");
+    // Включение тактирования портов и USART1
+    rcu_periph_clock_enable(RCU_GPIOA);
+    rcu_periph_clock_enable(RCU_USART1);
+
+    // Настройка GPIO
+    gpio_init(GPIOA, GPIO_MODE_AF_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_2);
+    gpio_init(GPIOA, GPIO_MODE_IN_FLOATING, GPIO_OSPEED_50MHZ, GPIO_PIN_3);
+
+    // Настройка USART1
+    usart_deinit(USART1);
+    usart_baudrate_set(USART1, 115200);
+    usart_word_length_set(USART1, USART_WL_8BIT);
+    usart_stop_bit_set(USART1, USART_STB_1BIT);
+    usart_parity_config(USART1, USART_PM_NONE);
+    usart_transmit_config(USART1, USART_TRANSMIT_ENABLE);
+    usart_receive_config(USART1, USART_RECEIVE_ENABLE);
+    usart_enable(USART1);
+
+    nvic_irq_enable(USART1_IRQn, 0, 0);
+    usart_interrupt_enable(USART1, USART_INT_RBNE);
+
+    while(1) {
+        __WFI();
+            
+         
+    }
+}
