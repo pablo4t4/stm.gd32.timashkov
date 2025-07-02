@@ -1,0 +1,172 @@
+
+///Настройка ЦАП для выдачи синусоидального сигнала. вывод в юарт
+
+#include "gd32f30x.h"
+#include <cmath>
+#include <cstdint>
+#include "gd32f30x_dac.h"
+#include "gd32f30x_dma.h"
+#include "gd32f30x_usart.h"
+#include "gd32f30x_exti.h"
+#include "gd32f30x_gpio.h"
+#include <cstdio>
+#define RX_BUF_SIZE 64
+char rx_buf[RX_BUF_SIZE];
+uint8_t rx_idx = 0;
+volatile uint8_t rx_ready = 0;
+class DacController {
+public:
+    static constexpr uint16_t DAC_BUF_SIZE = 128;
+    uint16_t sine_buf[DAC_BUF_SIZE];
+
+    DacController() {
+        // Включаем тактирование
+        rcu_periph_clock_enable(RCU_GPIOA);
+        rcu_periph_clock_enable(RCU_DAC);
+        rcu_periph_clock_enable(RCU_DMA1);
+        rcu_periph_clock_enable(RCU_TIMER6);
+
+        // Настраиваем PA4 как аналоговый выход (DAC_OUT)
+        gpio_init(GPIOA, GPIO_MODE_AIN, GPIO_OSPEED_50MHZ, GPIO_PIN_4);
+
+        // Отключаем DAC перед настройкой
+        dac_deinit();
+    }
+
+    void output_constant(uint16_t value) {
+        dac_trigger_disable(DAC0);
+        dac_wave_mode_config(DAC0, DAC_WAVE_DISABLE);
+        dac_output_buffer_enable(DAC0);
+        dac_enable(DAC0);
+        dac_data_set(DAC_ALIGN_12B_R, DAC0, value & 0x0FFF);
+    }
+
+    void output_sine(uint16_t amplitude = 2047, uint16_t offset = 2048) {
+        // Заполняем буфер синусоидой
+        for (uint16_t i = 0; i < DAC_BUF_SIZE; ++i) {
+            float angle = 2.0f * 3.1415926f * i / DAC_BUF_SIZE;
+            sine_buf[i] = offset + static_cast<uint16_t>(amplitude * std::sin(angle));
+        }
+
+        // Настройка DMA
+        dma_parameter_struct dma_init_struct;
+        dma_deinit(DMA1, DMA_CH2);
+        dma_struct_para_init(&dma_init_struct);
+        dma_init_struct.periph_addr  = (uint32_t)&DAC0_R12DH;
+        dma_init_struct.memory_addr  = (uint32_t)sine_buf;
+        dma_init_struct.direction    = DMA_MEMORY_TO_PERIPHERAL;
+        dma_init_struct.memory_width = DMA_MEMORY_WIDTH_16BIT;
+        dma_init_struct.periph_width = DMA_PERIPHERAL_WIDTH_16BIT;
+        dma_init_struct.priority     = DMA_PRIORITY_HIGH;
+        dma_init_struct.number       = DAC_BUF_SIZE;
+        dma_init_struct.periph_inc   = DMA_PERIPH_INCREASE_DISABLE;
+        dma_init_struct.memory_inc   = DMA_MEMORY_INCREASE_ENABLE;
+        //dma_init_struct.circular     = 1;
+        dma_init(DMA1, DMA_CH2, &dma_init_struct);
+        dma_circulation_enable(DMA1, DMA_CH2); 
+        dma_channel_enable(DMA1, DMA_CH2);
+
+        // Настройка DAC
+        dac_trigger_source_config(DAC0, DAC_TRIGGER_T6_TRGO);
+        dac_trigger_enable(DAC0);
+        dac_wave_mode_config(DAC0, DAC_WAVE_DISABLE);
+        dac_output_buffer_enable(DAC0);
+        dac_dma_enable(DAC0);
+        dac_enable(DAC0);
+
+        
+
+        // Настройка таймера (частота синусоиды зависит от period)
+        timer_parameter_struct timer_initpara;
+        timer_struct_para_init(&timer_initpara);
+        timer_initpara.prescaler         = 71; // 72MHz/72 = 1MHz
+        timer_initpara.alignedmode       = TIMER_COUNTER_EDGE;
+        timer_initpara.counterdirection  = TIMER_COUNTER_UP;
+        timer_initpara.period            = 1000-1; // 1kHz update event
+        timer_initpara.clockdivision     = TIMER_CKDIV_DIV1;
+        timer_initpara.repetitioncounter = 0;
+        timer_deinit(TIMER6);
+        timer_init(TIMER6, &timer_initpara);
+
+        // Настройка TRGO
+        timer_master_output_trigger_source_select(TIMER6, TIMER_TRI_OUT_SRC_UPDATE); 
+
+        timer_enable(TIMER6);
+    }
+};
+
+
+void exti_config(void)
+{
+    rcu_periph_clock_enable(RCU_AF); 
+
+    
+    gpio_exti_source_select(GPIO_PORT_SOURCE_GPIOC, GPIO_PIN_SOURCE_13);
+    exti_init(EXTI_13, EXTI_INTERRUPT, EXTI_TRIG_FALLING); // Прерывание по спаду (кнопка нажата)
+    exti_interrupt_flag_clear(EXTI_13); // Очищаем флаг прерывания
+
+    // Настраиваем NVIC (включаем прерывание EXTI15_10)
+    nvic_irq_enable(EXTI10_15_IRQn, 0, 0); // Приоритет 2, подприоритет 0
+}
+
+extern "C" void USART1_IRQHandler(void)
+{
+    if (usart_interrupt_flag_get(USART1, USART_INT_FLAG_RBNE) != RESET) {
+        uint8_t ch = usart_data_receive(USART1);
+        // Отладка каждого символа
+        //sprintf("otladka: \r");
+        //usart_data_transmit(USART1, ch);
+        while (usart_flag_get(USART1, USART_FLAG_TBE) == RESET);
+
+        if ((ch == '\r' || ch == '\n') && rx_idx > 0) {
+            rx_buf[rx_idx] = 0;
+            rx_ready = 1;
+            rx_idx = 0;
+        } else if (rx_idx < RX_BUF_SIZE - 1 && ch != '\r' && ch != '\n') {
+            rx_buf[rx_idx++] = ch;
+            
+        } else if (rx_idx >= RX_BUF_SIZE - 1) {
+            rx_idx = 0;
+        }
+    }
+}
+
+extern "C" int main(void) {
+    DacController dac;
+
+    
+    dac.output_constant(2048);
+    dac.output_sine(1800, 2048);
+    //for (volatile uint32_t i = 0; i < 800000; ++i);
+    //dac.output_sine(1800, 2048);
+
+    rcu_periph_clock_enable(RCU_GPIOA);
+    rcu_periph_clock_enable(RCU_USART1);
+
+    gpio_init(GPIOA, GPIO_MODE_AF_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_2);
+    gpio_init(GPIOA, GPIO_MODE_IN_FLOATING, GPIO_OSPEED_50MHZ, GPIO_PIN_3);
+        // Настройка USART1
+    usart_deinit(USART1);
+    usart_baudrate_set(USART1, 115200);
+    usart_word_length_set(USART1, USART_WL_8BIT);
+    usart_stop_bit_set(USART1, USART_STB_1BIT);
+    usart_parity_config(USART1, USART_PM_NONE);
+    usart_transmit_config(USART1, USART_TRANSMIT_ENABLE);
+    usart_receive_config(USART1, USART_RECEIVE_ENABLE);
+    usart_enable(USART1);
+
+    nvic_irq_enable(USART1_IRQn, 0, 0);
+    usart_interrupt_enable(USART1, USART_INT_RBNE);
+
+    uint16_t idx = 0;
+    while (1) {
+    char debug_msg[50];
+    snprintf(debug_msg, sizeof(debug_msg), "result sinus: %d\r\n", dac.sine_buf[idx]);
+        for(const char* p = debug_msg; *p; ++p) {
+            usart_data_transmit(USART1, *p);
+            while(usart_flag_get(USART1, USART_FLAG_TBE) == RESET);
+        }
+        idx = (idx + 1) % DacController::DAC_BUF_SIZE;
+        for (volatile uint32_t i = 0; i < 800000; ++i);
+    }
+}
