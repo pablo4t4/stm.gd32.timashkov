@@ -1,0 +1,49 @@
+
+//диод медленно "дышит". программный шим
+
+#include "gd32f30x.h"
+#include <stdint.h>
+
+//#define LED_PIN  GPIO_PIN_13
+//#define LED_PORT GPIOC
+ #define LED_PIN  GPIO_PIN_5   // Пин светодиода
+ #define LED_PORT GPIOA 
+void gpio_led_init(void) {
+    rcu_periph_clock_enable(RCU_GPIOA);
+    gpio_init(LED_PORT, GPIO_MODE_OUT_PP, GPIO_OSPEED_50MHZ, LED_PIN);
+}
+
+void delay_us(uint32_t us) {
+    for (volatile uint32_t i = 0; i < us * 8; ++i) __NOP();
+}
+
+void delay_ms(uint32_t ms) {
+    for (uint32_t i = 0; i < ms; ++i) delay_us(1000);
+}
+
+int main(void) {
+    gpio_led_init();
+
+    uint16_t brightness = 0;
+    int8_t direction = 1;
+
+    while (1) {
+        
+        for (uint16_t i = 0; i < 1000; ++i) {
+            if (i < brightness)
+                gpio_bit_set(LED_PORT, LED_PIN); 
+            else
+                gpio_bit_reset(LED_PORT, LED_PIN); 
+            delay_us(1);
+        }
+
+        brightness += direction * 2;
+        if (brightness >= 1000) {
+            brightness = 1000;
+            direction = -1;
+        } else if (brightness == 0) {
+            direction = 1;
+        }
+        // 
+    }
+}
